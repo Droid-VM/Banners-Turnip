@@ -67,11 +67,15 @@ prepare_workdir(){
 		return
 	fi
 
-	echo "Downloading android-ndk from google server..."
-	curl -sL https://dl.google.com/android/repository/"$ndkver"-linux.zip --output "$ndkver"-linux.zip &> /dev/null
+	if [ -d "$ndkver" ]; then
+		echo "Reusing extracted android-ndk..."
+	else
+		echo "Downloading android-ndk from google server..."
+		curl -sL https://dl.google.com/android/repository/"$ndkver"-linux.zip --output "$ndkver"-linux.zip &> /dev/null
 
-	echo "Extracting android-ndk..."
-	unzip -q "$ndkver"-linux.zip &> /dev/null
+		echo "Extracting android-ndk..."
+		unzip -q "$ndkver"-linux.zip &> /dev/null
+	fi
 
 	echo "Downloading mesa source at $mesa_ref..."
 	git init -q $srcfolder
