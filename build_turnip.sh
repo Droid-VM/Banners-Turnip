@@ -67,7 +67,22 @@ prepare_workdir(){
 		return
 	fi
 
-	if [ -d "$ndkver" ]; then
+	# DroidVM: use an external NDK instead of downloading. Point TURNIP_NDK_DIR at an
+	# extracted android-ndk-r29 root; it is symlinked into the workdir. The version
+	# contract stays r29 -- substituting another NDK release changes the toolchain and
+	# breaks "same pin, same driver".
+	if [ -n "$TURNIP_NDK_DIR" ] && [ ! -e "$ndkver" ]; then
+		if [ ! -d "$TURNIP_NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin" ]; then
+			echo -e "${red}TURNIP_NDK_DIR=$TURNIP_NDK_DIR has no toolchains/llvm/prebuilt/linux-x86_64/bin -- not an extracted NDK root${nocolor}"
+			exit 1
+		fi
+		echo "Linking android-ndk from $TURNIP_NDK_DIR..."
+		# -sfn: a dangling symlink left by a moved external NDK fails plain ln; a real
+		# directory never reaches here (the ! -e guard above is false for it).
+		ln -sfn "$(realpath "$TURNIP_NDK_DIR")" "$ndkver"
+	fi
+
+	if [ -d "$ndkver/" ]; then
 		echo "Reusing extracted android-ndk..."
 	else
 		echo "Downloading android-ndk from google server..."
