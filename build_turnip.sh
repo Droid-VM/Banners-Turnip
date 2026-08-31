@@ -42,12 +42,27 @@ prepare_workdir(){
 	echo "Preparing work directory..."
 	mkdir -p "$workdir" && cd "$_"
 
+	# DroidVM: build from the exact upstream commit recorded in mesa_hash.txt instead
+	# of whatever mesa/main is right now -- the same checkout of this repo must always
+	# produce the same driver. Bumping = updating mesa_hash.txt (upstream's
+	# mesa-watcher moves it on every mesa/main commit, so a rebase onto upstream
+	# A8xx bumps it for free). TURNIP_MESA_REF=main opts back into bleeding edge.
+	mesa_ref="${TURNIP_MESA_REF:-$(cat "$workdir/../mesa_hash.txt")}"
+
 	if [ "${SKIP_SOURCE_DOWNLOAD}" = "1" ]; then
 		echo "Skipping NDK + Mesa download (reusing existing source)..."
-		# Reset Mesa source to clean state before re-patching
+		# Reset Mesa source to clean state before re-patching. clean -fd drops the
+		# .rej/.orig droppings and patch-created files checkout cannot see -- stale
+		# rejects would otherwise trip the reject gate below on every rebuild.
 		if [ -d "$srcfolder/.git" ]; then
 			echo "Resetting Mesa source tree..."
 			git -C "$srcfolder" checkout .
+			git -C "$srcfolder" clean -qfd
+			cur=$(git -C "$srcfolder" rev-parse HEAD)
+			if [ "$mesa_ref" != main ] && [ "$mesa_ref" != "$cur" ]; then
+				echo -e "${red}Warning: mesa tree is at $cur but mesa_hash.txt wants $mesa_ref"
+				echo -e "         (rebuilding what is checked out; delete turnip_workdir/mesa to re-pin)${nocolor}"
+			fi
 		fi
 		return
 	fi
@@ -58,18 +73,39 @@ prepare_workdir(){
 	echo "Extracting android-ndk..."
 	unzip -q "$ndkver"-linux.zip &> /dev/null
 
-	echo "Downloading mesa source..."
-	git clone $mesasrc --depth=1 -b main $srcfolder
+	echo "Downloading mesa source at $mesa_ref..."
+	git init -q $srcfolder
+	git -C "$srcfolder" remote add origin "$mesasrc"
+	git -C "$srcfolder" fetch --depth=1 origin "$mesa_ref"
+	git -C "$srcfolder" checkout -q FETCH_HEAD
 }
 
 build_lib_for_android(){
 	cd "$workdir/$srcfolder"
 	echo "==== Building Mesa on $1 branch ===="
 
-	# Apply optional patch series if EXTRA_PATCH is set (e.g. patches/tu8_kgsl_26.patch)
-	if [ -n "$EXTRA_PATCH" ] && [ -f "../../$EXTRA_PATCH" ]; then
-		echo "Applying patch series: $EXTRA_PATCH"
-		patch -p1 -N --fuzz=4 < "../../$EXTRA_PATCH" || echo -e "${red}Warning: partial patch failures, continuing...${nocolor}"
+	# Apply optional patches if EXTRA_PATCH is set (colon-separated list, applied
+	# in order, e.g. patches/a8xx_gen8.patch:patches/droidvm_kgsl.patch)
+	if [ -n "$EXTRA_PATCH" ]; then
+		IFS=':' read -ra PATCHES <<< "$EXTRA_PATCH"
+		for PATCH_FILE in "${PATCHES[@]}"; do
+			if ! [ -f "../../$PATCH_FILE" ]; then
+				echo -e "${red}Patch $PATCH_FILE not found, aborting!${nocolor}"; exit 1
+			fi
+			echo "Applying patch series: $PATCH_FILE"
+			patch -p1 -N --fuzz=4 < "../../$PATCH_FILE" || echo -e "${red}Warning: partial patch failures, continuing...${nocolor}"
+		done
+		# DroidVM: with mesa pinned to mesa_hash.txt every hunk must land -- a hunk
+		# left in a .rej is a half-patched driver that still builds and looks fine.
+		# PATCH_REJECTS_OK=1 restores the old tolerant behavior (unpinned mesa).
+		if [ "${PATCH_REJECTS_OK:-0}" != "1" ]; then
+			rejects=$(find . -name '*.rej')
+			if [ -n "$rejects" ]; then
+				echo -e "${red}Patch hunks were rejected:${nocolor}"
+				echo "$rejects"
+				exit 1
+			fi
+		fi
 	fi
 
 	# Apply optional Python scripts if EXTRA_SCRIPT is set (colon-separated list)
