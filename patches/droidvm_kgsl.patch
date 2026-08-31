@@ -1,0 +1,122 @@
+DroidVM kgsl fixes for the host driver.
+
+gfxstream/venus (vk command proxy) executes the guest's Vulkan on this
+turnip over kgsl on the host phone. Squash of Droid-VM/turnip gen8
+486c9735e9d + b43c434e0f + bf2112ca28:
+
+- kgsl: poll timestamps instead of blocking. A timeout of 0 means "wait
+  indefinitely" to KGSL's WAITTIMESTAMP, so an already-expired deadline
+  (every vk_sync_timeline GC poll) blocked up to a whole frame while
+  holding the timeline mutex; 374 such calls were 556ms of a 588ms total
+  under Minecraft. Read KGSL_TIMESTAMP_RETIRED instead (~12us).
+- kgsl: track sparse VMAs in dump-bo list. kgsl_sparse_vma_init skipped
+  tu_dump_bo_init, leaving dump_bo_list_idx 0 (not ~0); tu_dump_bo_del
+  then dereferenced an empty dump_bo_list on free (crash on world-gen).
+- kgsl: tolerate KHR_display instance extension. Clients like
+  zink-on-weston-DRM enable it opportunistically yet drive scanout
+  through GBM/dmabuf; rejecting instance creation broke that valid path.
+  The physical-device display queries just report zero displays.
+
+Context regenerated against mesa 7f196910eb35aca76cf58d0c572c72c099e971a2.
+
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 9e0fc93..6e56e0b 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -520,6 +520,11 @@ kgsl_sparse_vma_init(struct tu_device *dev,
+       .base = base,
+    };
+ 
++   /* Sparse VMAs must join the dump-bo tracking like every other BO;
++    * without this dump_bo_list_idx is left 0 (not ~0) and tu_dump_bo_del
++    * dereferences an empty dump_bo_list on free (crash on world-gen). */
++   tu_dump_bo_init(dev, bo);
++
+    if (flags & TU_SPARSE_VMA_REPLAYABLE) {
+       VkResult result = kgsl_bo_user_map(dev, bo, client_iova);
+       if (result != VK_SUCCESS)
+@@ -785,6 +790,31 @@ get_relative_ms(uint64_t abs_timeout_ns)
+    return abs_timeout_ms - cur_time_ms;
+ }
+ 
++/* Has the context already executed past this timestamp?
++ *
++ * KGSL's WAITTIMESTAMP cannot answer this, because a timeout of 0 means "wait
++ * indefinitely" to it -- adreno_drawctxt_wait() reads
++ *
++ *    if (timeout) wait_event_timeout(...); else wait_event(...);
++ *
++ * -- while every caller here means "do not wait, just tell me". Reading the
++ * retired timestamp instead is what a poll actually wants and costs about the
++ * same as a WAITTIMESTAMP that returns immediately (~12us measured).
++ */
++static VkResult
++poll_timestamp(int fd, unsigned int context_id, unsigned int timestamp)
++{
++   struct kgsl_cmdstream_readtimestamp_ctxtid req = {
++      .context_id = context_id,
++      .type = KGSL_TIMESTAMP_RETIRED,
++   };
++
++   if (safe_ioctl(fd, IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID, &req))
++      return VK_ERROR_UNKNOWN;
++
++   return timestamp_cmp(req.timestamp, timestamp) ? VK_SUCCESS : VK_TIMEOUT;
++}
++
+ /* safe_ioctl is not enough as restarted waits would not adjust the timeout
+  * which could lead to waiting substantially longer than requested
+  */
+@@ -794,6 +824,19 @@ wait_timestamp_safe(int fd,
+                     unsigned int timestamp,
+                     uint64_t abs_timeout_ns)
+ {
++   /* A deadline that has already passed is a poll, and handing KGSL the 0ms
++    * that represents makes it block until the timestamp retires instead of
++    * returning -- the opposite of what was asked for. It is not a rare path:
++    * vk_sync_timeline's garbage collector polls every pending point on every
++    * timeline query, so the first point still in flight stalls the caller for
++    * a whole frame, holding the timeline's mutex while it does. Tracing
++    * kgsl_waittimestamp_entry/exit under Minecraft, 374 calls of this shape
++    * accounted for 556ms of a 588ms total, median 1.4ms each, while the 1815
++    * calls that found their timestamp already retired cost 12-15us.
++    */
++   if (get_relative_ms(abs_timeout_ns) == 0)
++      return poll_timestamp(fd, context_id, timestamp);
++
+    struct kgsl_device_waittimestamp_ctxtid wait = {
+       .context_id = context_id,
+       .timestamp = timestamp,
+@@ -807,8 +850,13 @@ wait_timestamp_safe(int fd,
+          int timeout_ms = get_relative_ms(abs_timeout_ns);
+ 
+          /* update timeout to consider time that has passed since the start */
+-         if (timeout_ms == 0)
+-            return VK_TIMEOUT;
++         if (timeout_ms == 0) {
++            /* The deadline passed while the wait was interrupted, but the
++             * timestamp may well have retired in that same window -- ask,
++             * rather than reporting a timeout for work that is done.
++             */
++            return poll_timestamp(fd, context_id, timestamp);
++         }
+ 
+          wait.timeout = timeout_ms;
+       } else if (ret == -1) {
+@@ -1795,10 +1843,12 @@ tu_kgsl_get_raytracing(int fd)
+ VkResult
+ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+ {
+-   if (instance->vk.enabled_extensions.KHR_display) {
+-      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+-                       "I can't KHR_display");
+-   }
++   /* NOTE: we can't implement VK_KHR_display (no direct-KMS via kgsl), but
++    * merely having the *instance* extension enabled is harmless — clients
++    * like zink-on-weston-DRM enable it opportunistically yet drive scanout
++    * through GBM/dmabuf, never through vkGetPhysicalDeviceDisplay*.  The
++    * physical-device display queries just report zero displays.  Rejecting
++    * instance creation here broke that whole (valid) path, so tolerate it. */
+ 
+    struct tu_physical_device *device = (struct tu_physical_device *)
+       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
