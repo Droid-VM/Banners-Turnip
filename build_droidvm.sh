@@ -17,7 +17,7 @@ cd "$(dirname "$0")"
 
 export BUILD_VERSION="${BUILD_VERSION:-droidvm}"
 export BUILD_SUFFIX="${BUILD_SUFFIX:-DroidVM}"
-export EXTRA_PATCH="patches/a8xx_gen8.patch:patches/droidvm_a750_rb_ccu.patch:patches/droidvm_kgsl.patch"
+export EXTRA_PATCH="patches/a8xx_gen8.patch:patches/droidvm_a750_rb_ccu.patch:patches/droidvm_kgsl.patch:patches/droidvm_kgsl_priority.patch"
 export EXTRA_SCRIPT="patches/a8xx_shared_mem.py"
 export META_NAME="${META_NAME:-DroidVM Turnip}"
 export META_DESC="${META_DESC:-DroidVM host turnip for gfxstream/venus: upstream mesa pinned via mesa_hash.txt + A8xx gen8 stack + DroidVM a750 RB CCU and kgsl fixes. KGSL build.}"

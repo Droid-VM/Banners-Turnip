@@ -1,0 +1,47 @@
+KGSL contexts take the queue's global priority.
+
+The KGSL backend had one priority (submitqueue_priority_count 1) and made every context with
+KGSL_CONTEXT_PRIORITY_UNDEF, so the kernel's default (8, the third of four ringbuffers) held them all.
+A queue made with VK_EXT/KHR_global_priority now gets that priority: KGSL has 16 (0 highest), four to
+a ringbuffer, and a higher ringbuffer preempts a lower one. Medium keeps UNDEF, so a queue made
+without a priority is unchanged; high is 5 (the second ringbuffer), low 15, realtime 0.
+
+crosvm's display blit asks for high: on a phone whose GPU also runs a VM's rendering, its blit waited
+in the default ringbuffer behind whatever the guest had queued since the frame was drawn.
+
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -47,6 +47,9 @@
+    return ret;
+ }
+ 
++/* tu_get_submitqueue_priority's index for medium with KGSL's 16 priorities. */
++#define KGSL_DEFAULT_QUEUE_PRIORITY 10
++
+ static int
+ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
+@@ -56,6 +59,14 @@
+               KGSL_CONTEXT_PREAMBLE,
+    };
+ 
++   /* The queue's global priority as the context's: KGSL's 0 (highest) to 15, four to a ringbuffer, and a higher ringbuffer
++    * preempts a lower one (the system compositor's contexts are in the first). Medium (10) leaves the priority to the
++    * driver's default, as every context made without one has it (8, the third ringbuffer); high (5) is the second, so its
++    * work need not wait behind the default contexts' long submissions; low (15) the last.
++    */
++   if (queue->priority != KGSL_DEFAULT_QUEUE_PRIORITY)
++      req.flags |= (queue->priority << KGSL_CONTEXT_PRIORITY_SHIFT) & KGSL_CONTEXT_PRIORITY_MASK;
++
+    int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
+    if (ret)
+       return ret;
+@@ -1925,7 +1936,7 @@
+ 
+    device->has_raytracing = tu_kgsl_get_raytracing(fd);
+ 
+-   device->submitqueue_priority_count = 1;
++   device->submitqueue_priority_count = 16;
+    
+    device->timeline_type = vk_sync_timeline_get_type(&vk_kgsl_sync_type);
+ 
